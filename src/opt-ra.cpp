@@ -492,7 +492,8 @@ void Proc::allocRegs(bool unsafeOpt)
                         ops[op.in[i]].reg = r;
                         regstate[r] = op.in[i];
                     }
-                    else
+                    // if it's not a constant..
+                    else if(!ops[op.in[i]].canCSE() || ops[op.in[i]].nInputs())
                     {
                         if(ra_debug)
                         {
@@ -664,7 +665,7 @@ void Proc::allocRegs(bool unsafeOpt)
             }
 
             // clobbers - could try to save, but whatever
-            RegMask lost = op.regsLost(); usedRegs |= lost;
+            RegMask lost = op.regsLost();
             if(lost)
             {
                 RegMask notlost = ~lost;
@@ -679,17 +680,12 @@ void Proc::allocRegs(bool unsafeOpt)
                     usedRegsBlock |= R2Mask(r);
                     if(regstate[r] == noVal || R2Mask(r)&~lost) continue;
 
-                // Even though we can in principle always remat constants,
-                // it's probably better to save anyway 'cos might get free rename
-                // and we don't need to rely on phi-backtracks
-                #if 0
                     // if this is a constant, then don't save (can always remat)
                     if(ops[regstate[r]].canCSE() && !ops[regstate[r]].nInputs())
                     {
                         regstate[r] = noVal;
                         continue;
                     }
-                #endif
 
                     // scan from current op, don't wanna overwrite inputs
                     int s = findBest(notlost & ops[regstate[r]].regsMask(),
@@ -1328,8 +1324,6 @@ void Proc::allocRegs(bool unsafeOpt)
 
         if(op.scc >= sccUsed.size()) sccUsed.resize(op.scc + 1, false);
         if(op.flags.spill) sccUsed[op.scc] = true;
-
-        usedRegs |= R2Mask(op.reg);
     }
 
     std::vector<uint16_t>   slots(sccUsed.size(), 0xffff);
@@ -1375,6 +1369,39 @@ void Proc::allocRegs(bool unsafeOpt)
         }
     }
     
+    // do a little bit of cleanup in case we accidentally
+    // end up renaming constants..
+    for(auto b : live)
+    {
+        for(auto i : blocks[b].code)
+        {
+            if(ops[i].opcode == ops::rename)
+            {
+                auto r = ops[i].in[0];
+                if(ops[r].opcode == ops::lci
+                && ops[r].i64 == 0)
+                {
+                    ops[i].opcode = ops::lci;
+                    ops[i].i64 = 0;
+                }
+                else
+                if(ops[r].opcode == ops::lcf
+                && ops[r].f32 == 0)
+                {
+                    ops[i].opcode = ops::lcf;
+                    ops[i].f32 = 0;
+                }
+                else
+                if(ops[r].opcode == ops::lcd
+                && ops[r].f64 == 0)
+                {
+                    ops[i].opcode = ops::lcd;
+                    ops[i].f64 = 0;
+                }
+            }
+        }
+    }
+
     if(ra_debug) debug();
 
     opt_dce();
@@ -1559,4 +1586,21 @@ void Proc::findSCC()
     }
     
     if(scc_debug) debug();
+}
+
+void Proc::findUsedRegs()
+{
+    BJIT_LOG(" FindRegs");
+    usedRegs = 0;
+    for(auto b : live)
+    {
+        for(auto c : blocks[b].code)
+        {
+            usedRegs |= ops[c].regsLost();
+            if(ops[c].hasOutput())
+            {
+                usedRegs |= R2Mask(ops[c].reg);
+            }
+        }
+    }
 }
